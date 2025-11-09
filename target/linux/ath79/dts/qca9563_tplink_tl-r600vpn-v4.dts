@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/dts-v1/;
+
+#include "qca956x.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+/ {
+	compatible = "tplink,tl-r600vpn-v4", "qca,qca9563";
+	model = "TP-Link TL-R600VPN v4";
+
+	aliases {
+		label-mac-device = &eth0;
+		led-boot = &led_system;
+		led-failsafe = &led_system;
+		led-running = &led_system;
+		led-upgrade = &led_system;
+
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	leds: leds {
+		compatible = "gpio-leds";
+		led_enable: enable { gpios = <&gpio 5 GPIO_ACTIVE_LOW>; default-state = "on"; };
+		led_system: system {
+			gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "netdev";
+			linux,trigger-mode = "link tx rx";
+			trigger-sources = <&eth0>;
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys";
+		reset { label = "reset"; linux,code = <KEY_RESTART>; gpios = <&gpio 10 GPIO_ACTIVE_LOW>; debounce-interval = <60>; };
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&eth0 {
+	status = "okay";
+	phy-mode = "sgmii";
+
+	nvmem-cells = <&oeminfo_bmacaddr_3fc00>;
+	nvmem-cell-names = "mac-address";
+};
+
+/* Realtek DSA qua MDIO, họ RTL8367S dùng compatible theo family rtl8365mb */
+&mdio0 {
+	status = "okay";
+
+	switch0: ethernet-switch@0 {
+		compatible = "realtek,rtl8365mb";
+		reg = <0>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 { reg = <0>; label = "wan"; };
+			port@1 { reg = <1>; label = "phy1"; };
+			port@2 { reg = <2>; label = "phy2"; };
+			port@3 { reg = <3>; label = "phy3"; };
+			port@4 { reg = <4>; label = "lan"; };
+
+			port@6 {
+				reg = <6>;
+				label = "cpu";
+				ethernet = <&eth0>;
+				phy-mode = "sgmii";
+				fixed-link { speed = <1000>; full-duplex; };
+			};
+		};
+	};
+};
+
+&spi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+
+		/* NVMEM fixed-layout: cell MAC tuyệt đối tại 0x3fc09 */
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			oeminfo_bmacaddr_3fc00: macaddr@3fc09 {
+				reg = <0x0003fc09 0x6>;
+			};
+		};
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "bootloader";
+				reg = <0x00000000 0x0003fc00>; /* 255 KiB */
+				read-only;
+			};
+
+			partition@3ffc0 {
+				label = "oeminfo";
+				reg = <0x0003fc00 0x00000400>; /* 1 KiB */
+				read-only;
+			};
+
+			partition@40000 {
+				label = "kernel";
+				reg = <0x00040000 0x00300000>; /* 3 MiB */
+			};
+
+			partition@340000 {
+				label = "rootfs";
+				reg = <0x00340000 0x00a00000>; /* 10 MiB */
+			};
+
+			partition@d40000 {
+				label = "rootfs_data";
+				reg = <0x00d40000 0x002c0000>; /* 2.75 MiB */
+			};
+		};
+	};
+};
+
+&wmac { status = "disabled"; };
+&usb0 { status = "disabled"; };
+&usb1 { status = "disabled"; };

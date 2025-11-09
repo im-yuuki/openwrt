@@ -1,5 +1,16 @@
 include ./common-tp-link.mk
 
+define Device/tplink_tl-r600vpn-v4
+  $(Device/tplink-16mlzma)
+  SOC := qca9563
+  DEVICE_MODEL := TL-R600VPN
+  DEVICE_VARIANT := v4
+  TPLINK_HWID := 0x13000001
+  DEVICE_PACKAGES := kmod-dsa-realtek kmod-dsa-rtl8365mb
+  SUPPORTED_DEVICES += tl-r600vpn-v4 TL-R600VPNV4
+endef
+TARGET_DEVICES += tplink_tl-r600vpn-v4
+
 define Device/tplink_archer-a7-v5
   $(Device/tplink-safeloader-uimage)
   SOC := qca9563
