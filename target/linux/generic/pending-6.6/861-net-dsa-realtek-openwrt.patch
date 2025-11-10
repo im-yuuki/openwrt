@@ -766,7 +766,7 @@
 +	/* and we do need it to be VlanMC at index 0 */
 +	vlanmc_idx = 0;
 +
-+	dsa_switch_for_each_cpu_port(cpu_dp, ds) {
++	dsa_switch_for_each_cpu_port(cpu_dp, priv->ds) {
 +		ret = rtl8365mb_vlan4k_set(ds, cpu_dp->index, &vlan, NULL,
 +					   true);
 +		if (ret) {
@@ -811,7 +811,7 @@
 +	user_ports = dsa_user_ports(ds);
 +
  	/* Configure CPU tagging */
- 	dsa_switch_for_each_cpu_port(cpu_dp, ds) {
+ 	dsa_switch_for_each_cpu_port(cpu_dp, priv->ds) {
  		cpu->mask |= BIT(cpu_dp->index);
  
 +		/* Forward to all user ports */
@@ -832,9 +832,10 @@
 +	/* vlan config will only be effective for ports with vlan filtering */
 +	ds->configure_vlan_while_not_filtering = 1;
 +
- 	ret = rtl83xx_setup_user_mdio(ds);
- 	if (ret) {
- 		dev_err(priv->dev, "could not set up MDIO bus\n");
+ 	if (priv->setup_interface) {
+		ret = priv->setup_interface(ds);
+		if (ret) {
+			dev_err(priv->dev, "could not set up MDIO bus\n");
 @@ -2024,6 +2786,9 @@ static int rtl8365mb_setup(struct dsa_sw
  	/* Start statistics counter polling */
  	rtl8365mb_stats_setup(priv);
