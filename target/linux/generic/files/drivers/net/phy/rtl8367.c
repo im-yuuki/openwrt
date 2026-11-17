@@ -886,6 +886,40 @@ static int rtl8367_reset_chip(struct rtl8366_smi *smi)
 	return 0;
 }
 
+static int rtl8367_extif_set_sgmii(struct rtl8366_smi *smi, int id,
+				   struct rtl8367_port_ability *pa)
+{
+	u32 mask;
+	u32 val;
+
+	/* Only extif1 supports SGMII */
+	if (id != 1)
+		return -EINVAL;
+
+	mask = BIT(RTL8367_CFG_MAC8_SEL_SGMII_OFFSET) |
+	       BIT(RTL8367_CFG_MAC8_SEL_HSGMII_OFFSET) |
+	       BIT(RTL8367_CFG_SGMII_FDUP_OFFSET) |
+	       BIT(RTL8367_CFG_SGMII_LINK_OFFSET) |
+	       BIT(RTL8367_CFG_SGMII_TXFC_OFFSET) |
+	       BIT(RTL8367_CFG_SGMII_RXFC_OFFSET) |
+	       RTL8367_CFG_SGMII_SPD_MASK;
+
+	val = BIT(RTL8367_CFG_MAC8_SEL_SGMII_OFFSET);
+	if (pa->duplex)
+		val |= BIT(RTL8367_CFG_SGMII_FDUP_OFFSET);
+	if (pa->link)
+		val |= BIT(RTL8367_CFG_SGMII_LINK_OFFSET);
+	if (pa->txpause)
+		val |= BIT(RTL8367_CFG_SGMII_TXFC_OFFSET);
+	if (pa->rxpause)
+		val |= BIT(RTL8367_CFG_SGMII_RXFC_OFFSET);
+	val |= ((u32)pa->speed << RTL8367_CFG_SGMII_SPD_SHIFT) & RTL8367_CFG_SGMII_SPD_MASK;
+
+	REG_RMW(smi, RTL8367_REG_SDS_MISC, mask, val);
+
+	return 0;
+}
+
 static int rtl8367_extif_set_mode(struct rtl8366_smi *smi, int id,
 				  enum rtl8367_extif_mode mode)
 {
@@ -912,6 +946,8 @@ static int rtl8367_extif_set_mode(struct rtl8366_smi *smi, int id,
 		REG_RMW(smi, RTL8367_EXT_RGMXF_REG(id), BIT(6), BIT(6));
 		break;
 
+	case RTL8367_EXTIF_MODE_SGMII:
+	case RTL8367_EXTIF_MODE_HSGMII:
 	case RTL8367_EXTIF_MODE_MII_MAC:
 	case RTL8367_EXTIF_MODE_MII_PHY:
 	case RTL8367_EXTIF_MODE_DISABLED:
@@ -993,14 +1029,21 @@ static int rtl8367_extif_init(struct rtl8366_smi *smi, int id,
 		return err;
 
 	if (mode != RTL8367_EXTIF_MODE_DISABLED) {
-		err = rtl8367_extif_set_force(smi, id, &cfg->ability);
-		if (err)
-			return err;
+		if (mode == RTL8367_EXTIF_MODE_SGMII ||
+		    mode == RTL8367_EXTIF_MODE_HSGMII) {
+			err = rtl8367_extif_set_sgmii(smi, id, &cfg->ability);
+			if (err)
+				return err;
+		} else {
+			err = rtl8367_extif_set_force(smi, id, &cfg->ability);
+			if (err)
+				return err;
 
-		err = rtl8367_extif_set_rgmii_delay(smi, id, cfg->txdelay,
+			err = rtl8367_extif_set_rgmii_delay(smi, id, cfg->txdelay,
 						     cfg->rxdelay);
-		if (err)
-			return err;
+			if (err)
+				return err;
+		}
 	}
 
 	return 0;

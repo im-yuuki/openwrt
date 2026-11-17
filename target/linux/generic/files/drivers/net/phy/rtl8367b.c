@@ -162,7 +162,7 @@
 #define RTL8367B_DIS_REG			0x1305
 #define   RTL8367B_DIS_SKIP_MII_RXER(_x)	BIT(12 + (_x))
 #define   RTL8367B_DIS_RGMII_SHIFT(_x)		(4 * (_x))
-#define   RTL8367B_DIS_RGMII_MASK		0x7
+#define   RTL8367B_DIS_RGMII_MASK		0xf
 
 #define RTL8367B_DIS2_REG			0x13c3
 #define   RTL8367B_DIS2_SKIP_MII_RXER_SHIFT	4
@@ -604,6 +604,87 @@ static int rtl8367b_reset_chip(struct rtl8366_smi *smi)
 	return 0;
 }
 
+static int rtl8367b_extif_set_sgmii(struct rtl8366_smi *smi, int id,
+				   enum rtl8367_extif_mode mode,
+				   struct rtl8367_port_ability *pa)
+{
+	static const u16 red_data[][2] = {
+		{ 0x7180, 0x0002 },
+		{ 0x04D7, 0x0480 },
+		{ 0xF994, 0x0481 },
+		{ 0x31A2, 0x0482 },
+		{ 0x6960, 0x0483 },
+		{ 0x9728, 0x0484 },
+		{ 0x9D85, 0x0423 },
+		{ 0xD810, 0x0424 },
+	};
+	int i;
+	int err;
+	u32 val;
+
+	/* SGMII is only supported on extif1 */
+	if (id != 1)
+		return -EINVAL;
+
+	if (mode == RTL8367_EXTIF_MODE_HSGMII)
+		return -EINVAL; /* HSGMII not wired up on this driver */
+
+	/*
+	 * The switch was hard-reset at probe time, so the SDS block must be
+	 * re-initialised exactly like the vendor driver does.
+	 */
+	for (i = 0; i < ARRAY_SIZE(red_data); i++) {
+		REG_WR(smi, RTL8367_REG_SDS_INDACS_DATA, red_data[i][0]);
+		REG_WR(smi, RTL8367_REG_SDS_INDACS_ADR, red_data[i][1]);
+		REG_WR(smi, RTL8367_REG_SDS_INDACS_CMD, 0x00C0);
+	}
+
+	/*
+	 * Vendor (rtl8367s_config_init) additionally writes 0x28A0 -> 0x0482
+	 * after the redData sequence to disable SGMII pre-emphasis (vendor
+	 * comment: "disable pre-emphasis").  Keeping redData[3] = 0x31A2
+	 * here re-enables pre-emphasis and the SGMII link never locks.
+	 */
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_DATA, 0x28A0);
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_ADR, 0x0482);
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_CMD, 0x00C0);
+
+	/* select SGMII in the SDS block, force 1000Base-X link + pause */
+	val = BIT(RTL8367_CFG_MAC8_SEL_SGMII_OFFSET);
+	if (pa->duplex)
+		val |= BIT(RTL8367_CFG_SGMII_FDUP_OFFSET);
+	val |= ((u32)pa->speed << RTL8367_CFG_SGMII_SPD_SHIFT) & RTL8367_CFG_SGMII_SPD_MASK;
+	if (pa->link)
+		val |= BIT(RTL8367_CFG_SGMII_LINK_OFFSET);
+	if (pa->txpause)
+		val |= BIT(RTL8367_CFG_SGMII_TXFC_OFFSET);
+	if (pa->rxpause)
+		val |= BIT(RTL8367_CFG_SGMII_RXFC_OFFSET);
+
+	/*
+	 * Stock firmware writes SDS_MISC = 0x7740.  Bit 12 has no name in the
+	 * Realtek reference but is set on the known-good board; keep it.
+	 */
+	val |= BIT(12);
+
+	REG_RMW(smi, RTL8367_REG_SDS_MISC,
+		BIT(RTL8367_CFG_MAC8_SEL_SGMII_OFFSET) |
+		BIT(RTL8367_CFG_MAC8_SEL_HSGMII_OFFSET) |
+		BIT(RTL8367_CFG_SGMII_FDUP_OFFSET) |
+		RTL8367_CFG_SGMII_SPD_MASK |
+		BIT(RTL8367_CFG_SGMII_LINK_OFFSET) |
+		BIT(RTL8367_CFG_SGMII_TXFC_OFFSET) |
+		BIT(RTL8367_CFG_SGMII_RXFC_OFFSET) |
+		BIT(12), val);
+
+	/* serdes out of reset */
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_DATA, 0x7106);
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_ADR, 0x0003);
+	REG_WR(smi, RTL8367_REG_SDS_INDACS_CMD, 0x00C0);
+
+	return 0;
+}
+
 static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
 				   enum rtl8367_extif_mode mode)
 {
@@ -663,6 +744,8 @@ static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
 		REG_RMW(smi, RTL8367B_EXT_RGMXF_REG(id), BIT(6), BIT(6));
 		break;
 
+	case RTL8367_EXTIF_MODE_SGMII:
+	case RTL8367_EXTIF_MODE_HSGMII:
 	case RTL8367_EXTIF_MODE_MII_MAC:
 	case RTL8367_EXTIF_MODE_MII_PHY:
 	case RTL8367_EXTIF_MODE_DISABLED:
@@ -756,14 +839,25 @@ static int rtl8367b_extif_init(struct rtl8366_smi *smi, int id,
 		return err;
 
 	if (mode != RTL8367_EXTIF_MODE_DISABLED) {
+		if (mode == RTL8367_EXTIF_MODE_SGMII ||
+		    mode == RTL8367_EXTIF_MODE_HSGMII) {
+			/* stock runs SGMII forced-link with NWAY=0 (DI_FORCE = 0x1076) */
+			err = rtl8367b_extif_set_sgmii(smi, id, mode, &cfg->ability);
+			if (err)
+				return err;
+		}
+
 		err = rtl8367b_extif_set_force(smi, id, &cfg->ability);
 		if (err)
 			return err;
 
-		err = rtl8367b_extif_set_rgmii_delay(smi, id, cfg->txdelay,
+		if (mode != RTL8367_EXTIF_MODE_SGMII &&
+		    mode != RTL8367_EXTIF_MODE_HSGMII) {
+			err = rtl8367b_extif_set_rgmii_delay(smi, id, cfg->txdelay,
 						     cfg->rxdelay);
-		if (err)
-			return err;
+			if (err)
+				return err;
+		}
 	}
 
 	return 0;
