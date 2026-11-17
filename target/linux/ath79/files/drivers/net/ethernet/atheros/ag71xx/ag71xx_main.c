@@ -421,6 +421,9 @@ static void ag71xx_hw_stop(struct ag71xx *ag)
 	ag71xx_wr(ag, AG71XX_REG_TX_CTRL, 0);
 }
 
+static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np);
+static void ag71xx_sgmii_init_qca955x(struct device_node *np);
+
 static void ag71xx_hw_setup(struct ag71xx *ag)
 {
 	struct device_node *np = ag->pdev->dev.of_node;
@@ -460,6 +463,18 @@ static void ag71xx_hw_init(struct ag71xx *ag)
 	if (ag->mdio_reset)
 		reset_control_deassert(ag->mdio_reset);
 	msleep(200);
+
+	/*
+	 * Probe-time SGMII init: vendor does its SGMII calibration once at
+	 * kernel boot (athrs_sgmii_res_cal); do the equivalent here once
+	 * after the MAC reset.  MAC reset does NOT wipe the SGMII block
+	 * (stock keeps SERDES intact across link-related resets).
+	 */
+	if (of_property_read_bool(ag->pdev->dev.of_node,
+				    "qca956x-serdes-fixup")) {
+		ag71xx_sgmii_serdes_init_qca956x(ag->pdev->dev.of_node);
+		ag71xx_sgmii_init_qca955x(ag->pdev->dev.of_node);
+	}
 
 	ag71xx_hw_setup(ag);
 
@@ -583,14 +598,13 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 	void __iomem *gmac_base;
 	u32 serdes_cal;
 	u32 t;
+	bool have_serdes_cal;
 
 	np = of_get_child_by_name(np, "gmac-config");
 	if (!np)
 		return;
 
-	if (of_property_read_u32(np, "serdes-cal", &serdes_cal))
-		/* By default, use middle value for resistor calibration */
-		serdes_cal = 0x7;
+	have_serdes_cal = of_property_read_u32(np, "serdes-cal", &serdes_cal) == 0;
 
 	np_dev = of_parse_phandle(np, "device", 0);
 	if (!np_dev)
@@ -602,12 +616,72 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 		goto err_iomap;
 	}
 
-	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
-	t &= ~(QCA956X_SGMII_CONFIG_MODE_CTRL_MASK << QCA956X_SGMII_CONFIG_MODE_CTRL_SHIFT);
-	t |= QCA956X_SGMII_CONFIG_MODE_CTRL_SGMII_MAC;
-	__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+	ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
+			QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT
+					| QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
+	if (!have_serdes_cal) {
+		u32 i, n, nf, ns, vco_fast, vco_slow, begin = 0, end = 0;
 
-	pr_debug("%pOF: fixup SERDES calibration to value %i\n",
+		/*
+		 * No fixed calibration value in DTS: do the VCO-based scan
+		 * like the vendor driver does at boot.  Writing a fixed value
+		 * (e.g. 0x7) can break SGMII lock; the bootloader calibration
+		 * result is not visible to us.
+		 */
+		t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+		pr_info("SERDES pre-scan: 0x%08x (VCO_FAST=%u VCO_SLOW=%u)\n", t,
+			(t & QCA956X_SGMII_SERDES_VCO_FAST) ? 1 : 0,
+			(t & QCA956X_SGMII_SERDES_VCO_SLOW) ? 1 : 0);
+		vco_fast = (t & QCA956X_SGMII_SERDES_VCO_FAST) ? 1 : 0;
+		vco_slow = (t & QCA956X_SGMII_SERDES_VCO_SLOW) ? 1 : 0;
+
+		for (i = 0; i < 0x10; i++) {
+			t &= ~(QCA956X_SGMII_SERDES_RES_CALIBRATION_MASK
+				<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT);
+			t |= (i & QCA956X_SGMII_SERDES_RES_CALIBRATION_MASK)
+				<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT;
+			__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+			udelay(50);
+
+			n = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+			if (i == 0 || i == 1 || i == 8 || i == 0xf)
+				pr_info("SERDES cal=%u readback: 0x%08x\n", i, n);
+			nf = (n & QCA956X_SGMII_SERDES_VCO_FAST) ? 1 : 0;
+			ns = (n & QCA956X_SGMII_SERDES_VCO_SLOW) ? 1 : 0;
+
+			if (nf != vco_fast || ns != vco_slow) {
+				if (begin == 0) {
+					begin = i;
+					end = i;
+				} else {
+					end = i;
+				}
+			}
+
+			vco_fast = nf;
+			vco_slow = ns;
+		}
+
+		if (begin == 0)
+			serdes_cal = 0x7;
+		else
+			serdes_cal = (begin + end) >> 1;
+
+		pr_info("SGMII resistor calibration: %u (scan %u-%u)\n",
+			serdes_cal, begin, end);
+	}
+
+	/*
+	 * Forced 1000base-X, AN disabled: write the full vendor/u-boot value
+	 * instead of only MODE_CTRL.  The u-boot on this board does not init
+	 * SGMII at all, so FORCE_SPEED/SPEED bits would otherwise stay at
+	 * reset values while both partners expect forced mode (stock shows
+	 * SGMII_CONFIG = 0xa2 and MR_AN_CONTROL = 0x140).
+	 */
+	__raw_writel(0x000000a2, gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+	__raw_writel(0x00000140, gmac_base + QCA956X_GMAC_REG_MR_AN_CONTROL);
+
+	pr_info("%pOF: fixup SERDES calibration to value %i\n",
 		np_dev, serdes_cal);
 	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
 	t &= ~(QCA956X_SGMII_SERDES_RES_CALIBRATION_MASK
@@ -616,9 +690,6 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 			<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT;
 	__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
 
-	ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
-			QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT
-					| QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
 
 	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
 
@@ -642,9 +713,19 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 	ath79_device_reset_clear(QCA956X_RESET_SGMII_ANALOG);
 	ath79_device_reset_clear(QCA956X_RESET_SGMII);
 
-	while (!(__raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES)
-			& QCA956X_SGMII_SERDES_LOCK_DETECT_STATUS))
-		;
+	{
+		int lock_wait = 100000;
+
+		while (!(__raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES)
+				& QCA956X_SGMII_SERDES_LOCK_DETECT_STATUS)) {
+			if (!--lock_wait) {
+				pr_err("ag71xx: SGMII lock timeout (SERDES = 0x%08x)\n",
+				       __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES));
+				break;
+			}
+			udelay(1);
+		}
+	}
 
 	iounmap(gmac_base);
 err_iomap:
@@ -716,22 +797,25 @@ static void ag71xx_sgmii_init_qca955x(struct device_node *np)
 	 *
 	 * Issue a PHY reset in MR_AN_CONTROL to keep going.
 	 */
+	/* replicate the vendor driver: pulse PHY reset, no AN enable,
+	 * tolerate failure (the link partner side is in forced mode) */
 	do {
 		ag71xx_bit_set(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
-			       QCA955X_MR_AN_CONTROL_PHY_RESET |
-			       QCA955X_MR_AN_CONTROL_AN_ENABLE);
-		udelay(200);
+			       QCA955X_MR_AN_CONTROL_PHY_RESET);
+		udelay(100);
 		ag71xx_bit_clear(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
 				 QCA955X_MR_AN_CONTROL_PHY_RESET);
-		mdelay(300);
+		udelay(100);
 		sgmii_status = __raw_readl(gmac_base + QCA955X_GMAC_REG_SGMII_DEBUG) &
-					   QCA955X_SGMII_DEBUG_TX_STATE_MASK;
+			       QCA955X_SGMII_DEBUG_TX_STATE_MASK;
 
-		if (tries++ >= 20) {
-			pr_err("ag71xx: max retries for SGMII fixup exceeded\n");
+		if (tries++ >= 25)
 			break;
-		}
-	} while (!(sgmii_status == 0xf || sgmii_status == 0x10));
+	} while (!(sgmii_status == 0x0f || sgmii_status == 0x10));
+
+	/* the partner is forced mode: never leave AN_ENABLE set */
+	ag71xx_bit_clear(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
+			 QCA955X_MR_AN_CONTROL_AN_ENABLE);
 
 sgmii_out:
 	iounmap(gmac_base);
@@ -1504,11 +1588,6 @@ static int ag71xx_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -EINVAL;
-
-	if (of_property_read_bool(np, "qca956x-serdes-fixup")) {
-		ag71xx_sgmii_serdes_init_qca956x(np);
-		ag71xx_sgmii_init_qca955x(np);
-	}
 
 	err = ag71xx_setup_gmac(np);
 	if (err)
