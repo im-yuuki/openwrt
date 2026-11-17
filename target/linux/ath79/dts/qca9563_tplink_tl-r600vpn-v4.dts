@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+#include "qca956x.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	compatible = "tplink,tl-r600vpn-v4", "qca,qca9563";
+	model = "TP-Link TL-R600VPN v4";
+
+	aliases {
+		led-boot = &led_system;
+		led-failsafe = &led_system;
+		led-running = &led_system;
+		led-upgrade = &led_system;
+
+		label-mac-device = &eth0;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_system: system {
+			label = "green:system";
+			gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		led_enable: enable {
+			label = "green:enable";
+			gpios = <&gpio 5 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&gpio 10 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	/* RTL8367S managed 5-port GbE switch (SGMII to GMAC0) */
+	rtl8367s {
+		compatible = "realtek,rtl8367b";
+		realtek,extif = <6 1 0 9 1 1 1 1 1 2>; /* cpu port 6, SGMII (EXT_SGMII) */
+
+		mii-bus = <&mdio0>;
+		phy-id = <29>;
+
+		mdio-bus {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			phy0: ethernet-phy@0 {
+				reg = <0>;
+			};
+
+			phy1: ethernet-phy@1 {
+				reg = <1>;
+			};
+
+			phy2: ethernet-phy@2 {
+				reg = <2>;
+			};
+
+			phy3: ethernet-phy@3 {
+				reg = <3>;
+			};
+
+			phy4: ethernet-phy@4 {
+				reg = <4>;
+			};
+		};
+	};
+};
+
+&pinmux {
+	mdio_pins: mdio_pins {
+		/* GPIO 3 as MDC (0x21), GPIO 4 as MDIO (0x20) */
+		pinctrl-single,bits = <0x0 0x21000000 0xff000000>,
+					      <0x4 0x00000020 0x000000ff>;
+	};
+};
+
+&spi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x000000 0x040000>;
+				read-only;
+			};
+
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x040000 0x010000>;
+				read-only;
+			};
+
+			firmware: partition@50000 {
+				compatible = "denx,uimage";
+				label = "firmware";
+				reg = <0x050000 0x0fb0000>;
+			};
+		};
+	};
+};
+
+&mdio0 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+};
+
+&eth0 {
+	status = "okay";
+
+	/* ETH_SGMII control: stock writes 0x03000101 here at every link-up
+	   (pll-reg = <0 0x48 0> -> PLL+0x48 = ETH_SGMII). 0x56000000 was a
+	   copy of the vendor XMII/GMII value and clobbers stock on link-up. */
+	pll-data = <0x03000101 0x00000101 0x00001919>;
+	phy-mode = "sgmii";
+
+	qca956x-serdes-fixup;
+
+	mac-address = [cc 32 e5 99 fe c4];
+
+	gmac-config {
+		device = <&gmac>;
+	};
+
+	fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
+};
