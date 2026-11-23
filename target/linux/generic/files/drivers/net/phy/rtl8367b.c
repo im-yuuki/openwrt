@@ -164,6 +164,7 @@
 #define   RTL8367B_DIS_SKIP_MII_RXER(_x)	BIT(12 + (_x))
 #define   RTL8367B_DIS_RGMII_SHIFT(_x)		(4 * (_x))
 #define   RTL8367B_DIS_RGMII_MASK		0x7
+#define   RTL8367B_DIS_SGMII_MASK		0xf
 
 #define RTL8367B_DIS2_REG			0x13c3
 #define   RTL8367B_DIS2_SKIP_MII_RXER_SHIFT	4
@@ -288,6 +289,29 @@ struct rtl8367b_initval {
 
 #define RTL8367D_VID_MASK		0xfff
 #define RTL8367D_TA_VLAN_VID_MASK	RTL8367D_VID_MASK
+
+#define RTL8367B_SDS_INDACS_CMD_REG		0x6600
+#define   RTL8367B_SDS_INDACS_CMD_WRITE		0x00c0
+#define RTL8367B_SDS_INDACS_ADR_REG		0x6601
+#define RTL8367B_SDS_INDACS_DATA_REG		0x6602
+
+#define RTL8367B_SDS_MISC_REG			0x1d11
+#define   RTL8367B_SDS_MISC_SEL_SGMII		BIT(6)
+#define   RTL8367B_SDS_MISC_LINK		BIT(9)
+#define   RTL8367B_SDS_MISC_FDUP		BIT(10)
+#define   RTL8367B_SDS_MISC_SEL_HSGMII		BIT(11)
+/* purpose unknown, must be set for the SGMII link to work */
+#define   RTL8367B_SDS_MISC_UNK12		BIT(12)
+#define   RTL8367B_SDS_MISC_TXFC		BIT(13)
+#define   RTL8367B_SDS_MISC_RXFC		BIT(14)
+#define   RTL8367B_SDS_MISC_SPD_SHIFT		7
+#define   RTL8367B_SDS_MISC_SPD_MASK		GENMASK(8, 7)
+
+/* SDS registers written through the indirect access interface */
+#define RTL8367B_SDS_PREEMPH_ADR		0x0482
+#define   RTL8367B_SDS_PREEMPH_DISABLE		0x28a0
+#define RTL8367B_SDS_RESET_ADR			0x0003
+#define   RTL8367B_SDS_RESET_RELEASE		0x7106
 
 #define RTL8367D_REG_EXT_TXC_DLY		0x13f9
 #define RTL8367D_EXT1_RGMII_TX_DLY_MASK		0x38
@@ -645,6 +669,87 @@ static int rtl8367b_reset_chip(struct rtl8366_smi *smi)
 	return 0;
 }
 
+static int rtl8367b_sds_write(struct rtl8366_smi *smi, u16 adr, u16 data)
+{
+	int err;
+
+	REG_WR(smi, RTL8367B_SDS_INDACS_DATA_REG, data);
+	REG_WR(smi, RTL8367B_SDS_INDACS_ADR_REG, adr);
+	REG_WR(smi, RTL8367B_SDS_INDACS_CMD_REG, RTL8367B_SDS_INDACS_CMD_WRITE);
+
+	return 0;
+}
+
+static int rtl8367b_extif_set_sgmii(struct rtl8366_smi *smi, int id,
+				    struct rtl8367_port_ability *pa)
+{
+	/*
+	 * SDS PHY initialisation sequence as {data, address} pairs: the first
+	 * eight entries of redData[] written by rtl8367c_setAsicPortExtMode()
+	 * for EXT_SGMII in the vendor rtl8367s_api.c.
+	 */
+	static const u16 sds_init[][2] = {
+		{ 0x7180, 0x0002 },
+		{ 0x04d7, 0x0480 },
+		{ 0xf994, 0x0481 },
+		{ 0x31a2, 0x0482 },
+		{ 0x6960, 0x0483 },
+		{ 0x9728, 0x0484 },
+		{ 0x9d85, 0x0423 },
+		{ 0xd810, 0x0424 },
+	};
+	u32 mask, val;
+	int err;
+	int i;
+
+	/* The sequence below is the one of the RTL8367S */
+	if (smi->rtl8367b_chip != RTL8367B_CHIP_RTL8367S) {
+		dev_err(smi->parent, "SGMII is not supported on this chip\n");
+		return -EINVAL;
+	}
+
+	/* SGMII is only available on extif1 */
+	if (id != 1)
+		return -EINVAL;
+
+	/* The SDS block is back in its reset state, program it again */
+	for (i = 0; i < ARRAY_SIZE(sds_init); i++) {
+		err = rtl8367b_sds_write(smi, sds_init[i][1], sds_init[i][0]);
+		if (err)
+			return err;
+	}
+
+	/* With the default pre-emphasis setting the link does not lock */
+	err = rtl8367b_sds_write(smi, RTL8367B_SDS_PREEMPH_ADR,
+				 RTL8367B_SDS_PREEMPH_DISABLE);
+	if (err)
+		return err;
+
+	/* The link is forced, there is no autonegotiation */
+	mask = RTL8367B_SDS_MISC_SEL_SGMII | RTL8367B_SDS_MISC_SEL_HSGMII |
+	       RTL8367B_SDS_MISC_FDUP | RTL8367B_SDS_MISC_SPD_MASK |
+	       RTL8367B_SDS_MISC_LINK | RTL8367B_SDS_MISC_TXFC |
+	       RTL8367B_SDS_MISC_RXFC | RTL8367B_SDS_MISC_UNK12;
+
+	val = RTL8367B_SDS_MISC_SEL_SGMII | RTL8367B_SDS_MISC_UNK12;
+	if (pa->duplex)
+		val |= RTL8367B_SDS_MISC_FDUP;
+	val |= ((u32)pa->speed << RTL8367B_SDS_MISC_SPD_SHIFT) &
+	       RTL8367B_SDS_MISC_SPD_MASK;
+	if (pa->link)
+		val |= RTL8367B_SDS_MISC_LINK;
+	if (pa->txpause)
+		val |= RTL8367B_SDS_MISC_TXFC;
+	if (pa->rxpause)
+		val |= RTL8367B_SDS_MISC_RXFC;
+
+	REG_RMW(smi, RTL8367B_SDS_MISC_REG, mask, val);
+
+	/* Release the SDS from reset */
+	return rtl8367b_sds_write(smi, RTL8367B_SDS_RESET_ADR,
+				  RTL8367B_SDS_RESET_RELEASE);
+}
+
 static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
 				   enum rtl8367_extif_mode mode)
 {
@@ -704,6 +809,7 @@ static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
 		REG_RMW(smi, RTL8367B_EXT_RGMXF_REG(id), BIT(6), BIT(6));
 		break;
 
+	case RTL8367B_EXTIF_MODE_SGMII:
 	case RTL8367_EXTIF_MODE_MII_MAC:
 	case RTL8367_EXTIF_MODE_MII_PHY:
 	case RTL8367_EXTIF_MODE_DISABLED:
@@ -717,14 +823,18 @@ static int rtl8367b_extif_set_mode(struct rtl8366_smi *smi, int id,
 		return -EINVAL;
 	}
 
-	if (id <= 1)
+	if (id <= 1) {
+		u32 dis_mask = (mode == RTL8367B_EXTIF_MODE_SGMII) ?
+			       RTL8367B_DIS_SGMII_MASK : RTL8367B_DIS_RGMII_MASK;
+
 		REG_RMW(smi, RTL8367B_DIS_REG,
-			RTL8367B_DIS_RGMII_MASK << RTL8367B_DIS_RGMII_SHIFT(id),
+			dis_mask << RTL8367B_DIS_RGMII_SHIFT(id),
 			mode << RTL8367B_DIS_RGMII_SHIFT(id));
-	else
+	} else {
 		REG_RMW(smi, RTL8367B_DIS2_REG,
 			RTL8367B_DIS2_RGMII_MASK << RTL8367B_DIS2_RGMII_SHIFT,
 			mode << RTL8367B_DIS2_RGMII_SHIFT);
+	}
 
 	return 0;
 }
@@ -788,23 +898,34 @@ static int rtl8367b_extif_init(struct rtl8366_smi *smi, int id,
 			       struct rtl8367_extif_config *cfg)
 {
 	enum rtl8367_extif_mode mode;
+	bool sgmii;
 	int err;
 
 	mode = (cfg) ? cfg->mode : RTL8367_EXTIF_MODE_DISABLED;
+	sgmii = mode == RTL8367B_EXTIF_MODE_SGMII;
 
 	err = rtl8367b_extif_set_mode(smi, id, mode);
 	if (err)
 		return err;
 
 	if (mode != RTL8367_EXTIF_MODE_DISABLED) {
+		if (sgmii) {
+			err = rtl8367b_extif_set_sgmii(smi, id, &cfg->ability);
+			if (err)
+				return err;
+		}
+
 		err = rtl8367b_extif_set_force(smi, id, &cfg->ability);
 		if (err)
 			return err;
 
-		err = rtl8367b_extif_set_rgmii_delay(smi, id, cfg->txdelay,
-						     cfg->rxdelay);
-		if (err)
-			return err;
+		if (!sgmii) {
+			err = rtl8367b_extif_set_rgmii_delay(smi, id,
+							     cfg->txdelay,
+							     cfg->rxdelay);
+			if (err)
+				return err;
+		}
 	}
 
 	return 0;
