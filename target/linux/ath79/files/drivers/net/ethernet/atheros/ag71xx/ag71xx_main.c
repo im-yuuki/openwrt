@@ -607,6 +607,46 @@ static void ag71xx_bit_clear(void __iomem *reg, u32 bit)
 #define QCA956X_MR_AN_CONTROL_FORCED_1000X \
 	(QCA956X_MR_AN_CONTROL_SPEED_1000 | QCA956X_MR_AN_CONTROL_FULL_DUPLEX)
 
+/*
+ * Find the middle of the resistor calibration range in which the VCO
+ * status bits toggle. Needs the SERDES PLL to be enabled.
+ */
+static u32 ag71xx_sgmii_scan_serdes_cal_qca956x(void __iomem *gmac_base)
+{
+	u32 i, n, t, vco_fast, vco_slow, begin = 0, end = 0;
+
+	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+	vco_fast = !!(t & QCA956X_SGMII_SERDES_VCO_FAST);
+	vco_slow = !!(t & QCA956X_SGMII_SERDES_VCO_SLOW);
+
+	for (i = 0; i < 0x10; i++) {
+		t &= ~(QCA956X_SGMII_SERDES_RES_CALIBRATION_MASK
+			<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT);
+		t |= (i & QCA956X_SGMII_SERDES_RES_CALIBRATION_MASK)
+			<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT;
+		__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+		udelay(50);
+
+		n = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+		if (!!(n & QCA956X_SGMII_SERDES_VCO_FAST) != vco_fast ||
+		    !!(n & QCA956X_SGMII_SERDES_VCO_SLOW) != vco_slow) {
+			if (!begin)
+				begin = i;
+			end = i;
+		}
+
+		vco_fast = !!(n & QCA956X_SGMII_SERDES_VCO_FAST);
+		vco_slow = !!(n & QCA956X_SGMII_SERDES_VCO_SLOW);
+	}
+
+	pr_debug("SGMII resistor calibration scan: %u-%u\n", begin, end);
+
+	if (!begin)
+		return 0x7;
+
+	return (begin + end) >> 1;
+}
+
 static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
 					     bool forced)
 {
@@ -614,6 +654,7 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
 	void __iomem *gmac_base;
 	u32 serdes_cal;
 	u32 t;
+	bool scan_cal = false;
 	int i;
 
 	np = of_get_child_by_name(np, "gmac-config");
@@ -623,6 +664,7 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
 	if (of_property_read_u32(np, "serdes-cal", &serdes_cal)) {
 		/* By default, use middle value for resistor calibration */
 		serdes_cal = 0x7;
+		scan_cal = forced;
 	}
 
 	np_dev = of_parse_phandle(np, "device", 0);
@@ -639,6 +681,9 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
 		ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
 			     QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT |
 			     QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
+
+		if (scan_cal)
+			serdes_cal = ag71xx_sgmii_scan_serdes_cal_qca956x(gmac_base);
 
 		__raw_writel(QCA956X_SGMII_CONFIG_FORCED_1000X,
 			     gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
