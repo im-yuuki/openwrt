@@ -941,3 +941,15 @@ define Device/tplink_wbs510-v2
   TPLINK_BOARD_ID := WBS510V2
 endef
 TARGET_DEVICES += tplink_wbs510-v2
+
+define Device/tplink_tl-r600vpn-v4
+  SOC := qca9563
+  DEVICE_MODEL := TL-R600VPN
+  DEVICE_VARIANT := v4
+  DEVICE_PACKAGES := kmod-switch-rtl8367b
+  KERNEL := kernel-bin | append-dtb | lzma | uImage lzma
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | uImage lzma
+  IMAGE/sysupgrade.bin := append-kernel | append-rootfs | pad-rootfs | check-size | append-metadata
+  IMAGE_SIZE := 13312k
+endef
+TARGET_DEVICES += tplink_tl-r600vpn-v4
