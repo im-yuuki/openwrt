@@ -577,12 +577,15 @@ static void ag71xx_bit_clear(void __iomem *reg, u32 bit)
 	__raw_readl(reg);
 }
 
+#define QCA956X_SGMII_SERDES_LOCK_TRIES	100000
+
 static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 {
 	struct device_node *np_dev;
 	void __iomem *gmac_base;
 	u32 serdes_cal;
 	u32 t;
+	int i;
 
 	np = of_get_child_by_name(np, "gmac-config");
 	if (!np)
@@ -642,9 +645,15 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 	ath79_device_reset_clear(QCA956X_RESET_SGMII_ANALOG);
 	ath79_device_reset_clear(QCA956X_RESET_SGMII);
 
-	while (!(__raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES)
-			& QCA956X_SGMII_SERDES_LOCK_DETECT_STATUS))
-		;
+	for (i = 0; i < QCA956X_SGMII_SERDES_LOCK_TRIES; i++) {
+		t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
+		if (t & QCA956X_SGMII_SERDES_LOCK_DETECT_STATUS)
+			break;
+		udelay(1);
+	}
+	if (i == QCA956X_SGMII_SERDES_LOCK_TRIES)
+		pr_err("%pOF: SGMII SERDES lock timeout (SERDES = 0x%08x)\n",
+		       np_dev, t);
 
 	iounmap(gmac_base);
 err_iomap:
