@@ -422,6 +422,10 @@ static void ag71xx_hw_stop(struct ag71xx *ag)
 	ag71xx_wr(ag, AG71XX_REG_TX_CTRL, 0);
 }
 
+static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
+					     bool forced);
+static void ag71xx_sgmii_init_qca955x(struct device_node *np, bool forced);
+
 static void ag71xx_hw_setup(struct ag71xx *ag)
 {
 	struct device_node *np = ag->pdev->dev.of_node;
@@ -461,6 +465,17 @@ static void ag71xx_hw_init(struct ag71xx *ag)
 	if (ag->mdio_reset)
 		reset_control_deassert(ag->mdio_reset);
 	msleep(200);
+
+	/*
+	 * qca956x-sgmii-forced (with qca956x-serdes-fixup): the SGMII link
+	 * is forced to 1000base-X without autonegotiation, for switches that
+	 * do not autonegotiate. The MAC reset does not affect the SGMII block.
+	 */
+	if (of_property_read_bool(ag->pdev->dev.of_node,
+				  "qca956x-sgmii-forced")) {
+		ag71xx_sgmii_serdes_init_qca956x(ag->pdev->dev.of_node, true);
+		ag71xx_sgmii_init_qca955x(ag->pdev->dev.of_node, true);
+	}
 
 	ag71xx_hw_setup(ag);
 
@@ -580,7 +595,21 @@ static void ag71xx_bit_clear(void __iomem *reg, u32 bit)
 
 #define QCA956X_SGMII_SERDES_LOCK_TRIES	100000
 
-static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
+#define QCA956X_SGMII_CONFIG_SPEED_SHIFT	6
+#define QCA956X_SGMII_CONFIG_SPEED_1000M	0x2
+#define QCA956X_SGMII_CONFIG_FORCE_SPEED	BIT(5)
+#define QCA956X_SGMII_CONFIG_FORCED_1000X \
+	(QCA956X_SGMII_CONFIG_MODE_CTRL_SGMII_MAC | \
+	 QCA956X_SGMII_CONFIG_FORCE_SPEED | \
+	 (QCA956X_SGMII_CONFIG_SPEED_1000M << QCA956X_SGMII_CONFIG_SPEED_SHIFT))
+
+#define QCA956X_MR_AN_CONTROL_SPEED_1000	BIT(6)
+#define QCA956X_MR_AN_CONTROL_FULL_DUPLEX	BIT(8)
+#define QCA956X_MR_AN_CONTROL_FORCED_1000X \
+	(QCA956X_MR_AN_CONTROL_SPEED_1000 | QCA956X_MR_AN_CONTROL_FULL_DUPLEX)
+
+static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np,
+					     bool forced)
 {
 	struct device_node *np_dev;
 	void __iomem *gmac_base;
@@ -592,9 +621,10 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 	if (!np)
 		return;
 
-	if (of_property_read_u32(np, "serdes-cal", &serdes_cal))
+	if (of_property_read_u32(np, "serdes-cal", &serdes_cal)) {
 		/* By default, use middle value for resistor calibration */
 		serdes_cal = 0x7;
+	}
 
 	np_dev = of_parse_phandle(np, "device", 0);
 	if (!np_dev)
@@ -606,10 +636,21 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 		goto err_iomap;
 	}
 
-	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
-	t &= ~(QCA956X_SGMII_CONFIG_MODE_CTRL_MASK << QCA956X_SGMII_CONFIG_MODE_CTRL_SHIFT);
-	t |= QCA956X_SGMII_CONFIG_MODE_CTRL_SGMII_MAC;
-	__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+	if (forced) {
+		ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
+			     QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT |
+			     QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
+
+		__raw_writel(QCA956X_SGMII_CONFIG_FORCED_1000X,
+			     gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+		__raw_writel(QCA956X_MR_AN_CONTROL_FORCED_1000X,
+			     gmac_base + QCA956X_GMAC_REG_MR_AN_CONTROL);
+	} else {
+		t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+		t &= ~(QCA956X_SGMII_CONFIG_MODE_CTRL_MASK << QCA956X_SGMII_CONFIG_MODE_CTRL_SHIFT);
+		t |= QCA956X_SGMII_CONFIG_MODE_CTRL_SGMII_MAC;
+		__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_CONFIG);
+	}
 
 	pr_debug("%pOF: fixup SERDES calibration to value %i\n",
 		np_dev, serdes_cal);
@@ -620,9 +661,10 @@ static void ag71xx_sgmii_serdes_init_qca956x(struct device_node *np)
 			<< QCA956X_SGMII_SERDES_RES_CALIBRATION_SHIFT;
 	__raw_writel(t, gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
 
-	ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
-			QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT
-					| QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
+	if (!forced)
+		ath79_pll_wr(QCA956X_PLL_ETH_SGMII_SERDES_REG,
+			     QCA956X_PLL_ETH_SGMII_SERDES_LOCK_DETECT |
+			     QCA956X_PLL_ETH_SGMII_SERDES_EN_PLL);
 
 	t = __raw_readl(gmac_base + QCA956X_GMAC_REG_SGMII_SERDES);
 
@@ -663,12 +705,14 @@ out:
 	of_node_put(np);
 }
 
-static void ag71xx_sgmii_init_qca955x(struct device_node *np)
+static void ag71xx_sgmii_init_qca955x(struct device_node *np, bool forced)
 {
 	struct device_node *np_dev;
 	void __iomem *gmac_base;
 	u32 mr_an_status;
 	u32 sgmii_status;
+	u32 pcs_reset = QCA955X_MR_AN_CONTROL_PHY_RESET;
+	u8 max_tries = forced ? 25 : 20;
 	u8 tries = 0;
 	int err = 0;
 
@@ -726,22 +770,37 @@ static void ag71xx_sgmii_init_qca955x(struct device_node *np)
 	 *
 	 * Issue a PHY reset in MR_AN_CONTROL to keep going.
 	 */
+	if (!forced)
+		pcs_reset |= QCA955X_MR_AN_CONTROL_AN_ENABLE;
+
 	do {
 		ag71xx_bit_set(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
-			       QCA955X_MR_AN_CONTROL_PHY_RESET |
-			       QCA955X_MR_AN_CONTROL_AN_ENABLE);
-		udelay(200);
+			       pcs_reset);
+		udelay(forced ? 100 : 200);
 		ag71xx_bit_clear(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
 				 QCA955X_MR_AN_CONTROL_PHY_RESET);
-		mdelay(300);
+		/* No partner autonegotiation to wait for in forced mode */
+		if (forced)
+			udelay(100);
+		else
+			mdelay(300);
 		sgmii_status = __raw_readl(gmac_base + QCA955X_GMAC_REG_SGMII_DEBUG) &
 					   QCA955X_SGMII_DEBUG_TX_STATE_MASK;
 
-		if (tries++ >= 20) {
-			pr_err("ag71xx: max retries for SGMII fixup exceeded\n");
+		if (tries++ >= max_tries) {
+			/* The link may not come up in forced mode, ignore */
+			if (forced)
+				pr_debug("%pOF: SGMII TX state 0x%x after %u resets\n",
+					 np_dev, sgmii_status, tries);
+			else
+				pr_err("ag71xx: max retries for SGMII fixup exceeded\n");
 			break;
 		}
 	} while (!(sgmii_status == 0xf || sgmii_status == 0x10));
+
+	if (forced)
+		ag71xx_bit_clear(gmac_base + QCA955X_GMAC_REG_MR_AN_CONTROL,
+				 QCA955X_MR_AN_CONTROL_AN_ENABLE);
 
 sgmii_out:
 	iounmap(gmac_base);
@@ -940,7 +999,7 @@ __ag71xx_link_adjust(struct ag71xx *ag, bool update)
 			   of_device_is_compatible(np, "qca,qca9560-eth")) {
 			ath79_set_pllval(ag);
 			if (of_property_read_bool(np, "qca955x-sgmii-fixup"))
-				ag71xx_sgmii_init_qca955x(np);
+				ag71xx_sgmii_init_qca955x(np, false);
 		}
 	}
 
@@ -1528,9 +1587,10 @@ static int ag71xx_probe(struct platform_device *pdev)
 	if (!res)
 		return -EINVAL;
 
-	if (of_property_read_bool(np, "qca956x-serdes-fixup")) {
-		ag71xx_sgmii_serdes_init_qca956x(np);
-		ag71xx_sgmii_init_qca955x(np);
+	if (of_property_read_bool(np, "qca956x-serdes-fixup") &&
+	    !of_property_read_bool(np, "qca956x-sgmii-forced")) {
+		ag71xx_sgmii_serdes_init_qca956x(np, false);
+		ag71xx_sgmii_init_qca955x(np, false);
 	}
 
 	err = ag71xx_setup_gmac(np);
