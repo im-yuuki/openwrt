@@ -946,7 +946,7 @@ define Device/tplink_tl-r600vpn-v4
   SOC := qca9563
   DEVICE_MODEL := TL-R600VPN
   DEVICE_VARIANT := v4
-  DEVICE_PACKAGES := kmod-switch-rtl8367b
+  DEVICE_PACKAGES := kmod-switch-rtl8367b -wpad-basic-mbedtls -kmod-ath9k -kmod-ath9k-common
   KERNEL := kernel-bin | append-dtb | lzma | uImage lzma
   KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | uImage lzma
   IMAGE/sysupgrade.bin := append-kernel | append-rootfs | pad-rootfs | check-size | append-metadata
