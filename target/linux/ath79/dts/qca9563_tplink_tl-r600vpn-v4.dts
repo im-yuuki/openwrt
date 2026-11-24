@@ -111,44 +111,15 @@
 				read-only;
 			};
 
-			/*
-			 * Stock layout: the kernel starts at 0x40000 and U-Boot boots
-			 * it from its compiled-in default "bootm 0x9f040000". There is
-			 * no u-boot-env partition: the U-Boot environment sector
-			 * (0x40000-0x4ffff) is occupied by this kernel. Do not run
-			 * saveenv or setenv from the U-Boot console, it would overwrite
-			 * the kernel.
-			 */
-			firmware: partition@40000 {
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x040000 0x010000>;
+			};
+
+			firmware: partition@50000 {
 				compatible = "denx,uimage";
 				label = "firmware";
-				reg = <0x040000 0x0cf0000>;
-			};
-
-			/* stock regions, kept read-only and not used by OpenWrt */
-			partition@d30000 {
-				label = "device-info";
-				reg = <0x0d30000 0x10000>;
-				read-only;
-			};
-
-			partition@d40000 {
-				label = "support-list";
-				reg = <0x0d40000 0x10000>;
-				read-only;
-			};
-
-			partition@d50000 {
-				label = "firmware-info";
-				reg = <0x0d50000 0x10000>;
-				read-only;
-			};
-
-			/* stock config: LAN MAC as UCI text (option macaddr) */
-			partition@d60000 {
-				label = "tddp";
-				reg = <0x0d60000 0x10000>;
-				read-only;
+				reg = <0x050000 0xfb0000>;
 			};
 		};
 	};

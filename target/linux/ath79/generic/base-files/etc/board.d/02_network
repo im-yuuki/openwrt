@@ -574,7 +574,7 @@ ath79_setup_interfaces()
 		;;
 	tplink,tl-r600vpn-v4)
 		ucidef_add_switch "switch0" \
-			"1:lan:1" "2:lan:1" "3:lan:1" "4:lan:1" "6t@eth0" "0:wan:2"
+			"0:lan:1" "1:lan:1" "2:lan:1" "3:lan:1" "4:lan:1" "6t@eth0"
 		;;
 	ubnt,aircube-ac)
 		ucidef_add_switch "switch0" \
@@ -820,17 +820,6 @@ ath79_setup_macs()
 	tplink,tl-wr1043n-v5)
 		base_mac=$(mtd_get_mac_binary info 0x8)
 		wan_mac=$(macaddr_add "$base_mac" 1)
-		;;
-	tplink,tl-r600vpn-v4)
-		# The stock firmware stores the MAC in the tddp partition as UCI text
-		part=$(find_mtd_part tddp)
-		[ -n "$part" ] && lan_mac=$(strings "$part" | \
-			sed -n "s/^[[:space:]]*option macaddr '\([^']*\)'.*/\1/p" | head -n1)
-		[ -n "$lan_mac" ] && lan_mac=$(macaddr_canonicalize "$lan_mac")
-		# Empty tddp: random address, stored in /etc/config/network on first boot
-		[ -n "$lan_mac" ] || lan_mac=$(macaddr_random)
-		wan_mac=$(macaddr_add "$lan_mac" 1)
-		label_mac=$lan_mac
 		;;
 	ubnt,unifi)
 		label_mac=$(cat /sys/class/ieee80211/phy0/macaddress)
